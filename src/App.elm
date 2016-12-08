@@ -6,9 +6,9 @@ import Html.Events exposing (onClick, onInput)
 import String
 import Char
 import Http
-import Json.Decode as Json
-import Task
+import Json.Decode as Decode
 import Time
+import Task
 
 
 -- MODEL
@@ -38,9 +38,8 @@ init =
 type Msg
     = AddLocation
     | ZipChange String
-    | FetchSucceed Location Float
-    | FetchFail Http.Error
     | UpdateWeather Time.Time
+    | TemperatureLoaded (Result Http.Error ( Location, Float ))
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -55,7 +54,7 @@ update msg model =
                     List.any (\l -> l.zip == zipInput)
 
                 needUpdateModel =
-                    String.length zipInput == 5 && (not <| containsZip locations)
+                    String.length zipInput >= 5 && (not <| containsZip locations)
 
                 result =
                     if needUpdateModel then
@@ -77,21 +76,23 @@ update msg model =
             in
                 ( model, Cmd.batch commands )
 
-        FetchSucceed location temp ->
-            let
-                updateLocation =
-                    updateLocationTempByZip location.zip temp
+        TemperatureLoaded result ->
+            case result of
+                Err err ->
+                    ( model, Cmd.none )
 
-                locations_ =
-                    if List.member location model.locations then
-                        List.map updateLocation model.locations
-                    else
-                        model.locations ++ [ { location | temp = Just temp } ]
-            in
-                ( { model | locations = locations_ }, Cmd.none )
+                Ok ( location, temp ) ->
+                    let
+                        updateLocation =
+                            updateLocationTempByZip location.zip temp
 
-        FetchFail _ ->
-            ( model, Cmd.none )
+                        locations_ =
+                            if List.member location model.locations then
+                                List.map updateLocation model.locations
+                            else
+                                model.locations ++ [ { location | temp = Just temp } ]
+                    in
+                        ( { model | locations = locations_ }, Cmd.none )
 
 
 updateLocationTempByZip : String -> Float -> Location -> Location
@@ -106,6 +107,25 @@ updateLocationTempByZip zipCode temp location =
 -- HTTP
 
 
+createUrl : String -> List ( String, String ) -> String
+createUrl baseUrl args =
+    let
+        queryPair : ( String, String ) -> String
+        queryPair ( key, value ) =
+            queryEscape key ++ "=" ++ queryEscape value
+
+        queryEscape : String -> String
+        queryEscape string =
+            String.join "+" (String.split "%20" string)
+    in
+        case args of
+            [] ->
+                baseUrl
+
+            _ ->
+                baseUrl ++ "?" ++ String.join "&" (List.map queryPair args)
+
+
 fetchWeather : Location -> Cmd Msg
 fetchWeather location =
     let
@@ -113,18 +133,21 @@ fetchWeather location =
             location.zip
 
         url =
-            Http.url "http://api.openweathermap.org/data/2.5/weather"
+            createUrl "http://api.openweathermap.org/data/2.5/weather"
                 [ ( "zip", zipCode ++ ",us" )
                 , ( "units", "metric" )
                 , ( "APPID", "cbbf2cace105ede143a9d7becd38400c" )
                 ]
     in
-        Task.perform FetchFail (FetchSucceed location) (Http.get decodeWeatherResponse url)
+        Http.get url decodeWeatherResponse
+            |> Http.toTask
+            |> Task.map ((,) location)
+            |> Task.attempt TemperatureLoaded
 
 
-decodeWeatherResponse : Json.Decoder Float
+decodeWeatherResponse : Decode.Decoder Float
 decodeWeatherResponse =
-    Json.at [ "main", "temp" ] Json.float
+    Decode.at [ "main", "temp" ] Decode.float
 
 
 
